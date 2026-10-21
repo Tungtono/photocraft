@@ -818,6 +818,9 @@ pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &
                     Some(i) => d.items.insert(i, (Id::new("quiltWarp"), q)),
                     None => d.items.push((Id::new("quiltWarp"), q)),
                 },
+                // A `quiltWarp` the reader can't parse stays as stored (like an unreadable `PlLd`
+                // warp) unless a warp now in `warp` replaces it.
+                None if s.warp.is_none() && get_desc(t, "quiltWarp").is_some_and(|q| crate::blocks::warp_of(q).is_none()) => {}
                 None => d.items.retain(|(k, _)| !k.is("quiltWarp")),
             }
             match &s.filter_fx {
@@ -1517,6 +1520,45 @@ mod tests {
         assert!(!keys(&d).contains(&"quiltWarp".to_string()));
         assert_eq!(style(&d, "warp"), "warpCustom");
         assert_eq!(crate::blocks::parse_placed_warp(b"SoLd", &data), Some(single));
+    }
+
+    /// A `quiltWarp` the reader can't parse (here a 7 × 7 mesh with `deformNumRows: 0`, as ag-psd
+    /// writes a warp without counts) is kept as stored when the layer only moves, and still goes
+    /// when a readable warp replaces it.
+    #[test]
+    fn unreadable_quilt_warp_is_kept_over_a_template() {
+        use photocraft_geom::warp::BezierMesh;
+        let spec = |transform, warp| PlacedSpec { idnt: "i", placed: "p", transform, perspective: None, size: (60.0, 30.0), dpi: 72.0, warp, filter_fx: None };
+        let mut tpl = parse_sold(&sold_bytes(None, &spec(Affine::IDENTITY, None), &mut Vec::new())).expect("parses").descriptor;
+        let pts = Descriptor::new("rationalPoint")
+            .with("Hrzn", Value::UnitFloats { unit: *b"#Pxl", values: (0..49).map(|i| f64::from(i % 7) * 10.0).collect() })
+            .with("Vrtc", Value::UnitFloats { unit: *b"#Pxl", values: (0..49).map(|i| f64::from(i / 7) * 5.0).collect() });
+        let bounds = Descriptor::new("classFloatRect")
+            .with("Top ", Value::Double(0.0))
+            .with("Left", Value::Double(0.0))
+            .with("Btom", Value::Double(30.0))
+            .with("Rght", Value::Double(60.0));
+        let quilt = Descriptor::new("quiltWarp")
+            .with("warpStyle", Value::Enumerated { type_id: Id::new("warpStyle"), value: Id::new("warpCustom") })
+            .with("bounds", Value::Descriptor(bounds))
+            .with("deformNumRows", Value::Integer(0))
+            .with("deformNumCols", Value::Integer(7))
+            .with(
+                "customEnvelopeWarp",
+                Value::Descriptor(Descriptor::new("customEnvelopeWarp").with("meshPoints", Value::ObjectArray(ObjectArray { prefix: 49, body: pts }))),
+            );
+        let at = tpl.items.iter().position(|(k, _)| k.is("warp")).expect("warp");
+        tpl.items.insert(at, (Id::new("quiltWarp"), Value::Descriptor(quilt.clone())));
+        assert!(crate::blocks::warp_of(&quilt).is_none());
+        // Moved, warp unchanged (read as none): the key stays as it was.
+        let moved = parse_sold(&sold_bytes(Some(&tpl), &spec(Affine::translate(5.0, 7.0), None), &mut Vec::new())).expect("parses").descriptor;
+        assert_eq!(get_desc(&moved, "quiltWarp"), Some(&quilt));
+        // A warp set in its place replaces it.
+        let mut one = BezierMesh::identity([0.0, 0.0, 60.0, 30.0], 1, 1);
+        one.points[15] = [67.0, 30.0];
+        let single = Warp::custom(one, [0.0, 0.0, 60.0, 30.0]);
+        let warped = parse_sold(&sold_bytes(Some(&tpl), &spec(Affine::IDENTITY, Some(&single)), &mut Vec::new())).expect("parses").descriptor;
+        assert!(get_desc(&warped, "quiltWarp").is_none());
     }
 
     /// Export writes `Trnf` as the image of the custom warp's control-point box, the inverse of

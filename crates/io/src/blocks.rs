@@ -544,7 +544,7 @@ pub fn parse_placed_warp(key: &[u8; 4], data: &[u8]) -> Option<photocraft_geom::
 /// A `warp` descriptor (the `SoLd` key, or the whole descriptor after a `PlLd` record's corners)
 /// as a warp: `Some(None)` for no warp (`warpNone`, or a warp that moves nothing), `None` when it
 /// can't be read (an unknown style, missing bounds, a malformed mesh).
-fn warp_of(w: &Descriptor) -> Option<Option<photocraft_geom::warp::Warp>> {
+pub(crate) fn warp_of(w: &Descriptor) -> Option<Option<photocraft_geom::warp::Warp>> {
     use photocraft_geom::warp::{BezierMesh, Warp, WarpStyle};
     let style = enum_of(w, "warpStyle").and_then(|v| WarpStyle::parse(&String::from_utf8_lossy(v)))?;
     if style == WarpStyle::None {
@@ -593,10 +593,10 @@ fn warp_of(w: &Descriptor) -> Option<Option<photocraft_geom::warp::Warp>> {
 
 /// Patch boundaries (`0..=1`) for `patches` patches from a split warp's `quiltSlice` positions,
 /// which run from one source edge to the other (Photoshop writes them a fraction of a pixel past
-/// the edges). Missing slices mean evenly spaced patches; a count that doesn't match or slices
-/// that don't increase are unreadable.
+/// the edges). Missing slices (or an empty list, as ag-psd writes) mean evenly spaced patches; a
+/// count that doesn't match or slices that don't increase are unreadable.
 fn quilt_knots(slices: Option<Vec<f64>>, patches: usize) -> Option<Vec<f64>> {
-    let Some(s) = slices else {
+    let Some(s) = slices.filter(|s| !s.is_empty()) else {
         return Some((0..=patches).map(|i| i as f64 / patches as f64).collect());
     };
     let (first, last) = (*s.first()?, *s.last()?);
@@ -1039,6 +1039,10 @@ mod tests {
         assert_eq!(m.vs.len(), 4);
         assert!((m.vs[1] - 6.6 / 31.2).abs() < 1e-12 && (m.vs[2] - 18.6 / 31.2).abs() < 1e-12);
         assert_eq!(m.point(3, 4), [35.0, 40.0 / 3.0]);
+        // Empty slice lists (ag-psd writes `values: []` when a warp has none) mean evenly spaced
+        // patches, like missing ones.
+        let even = parse_placed_warp(b"SoLd", &warp(7, ny as i32, Vec::new())).expect("empty slices read").mesh.expect("mesh");
+        assert_eq!(even.us, [0.0, 0.5, 1.0]);
         // Malformed: grid size that isn't 3 per patch + 1, or doesn't match the points; slices that
         // don't match the patch count or don't increase.
         assert!(parse_placed_warp(b"SoLd", &warp(6, ny as i32, vec![-0.6, 30.0, 60.6])).is_none());
