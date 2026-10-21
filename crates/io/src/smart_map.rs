@@ -702,8 +702,8 @@ pub struct PlacedSpec<'a> {
 
 /// Where the frame corners land (top-left, top-right, bottom-right, bottom-left), as x, y pairs.
 /// The frame is [`crate::blocks::placed_frame`] of `warp`, the warp the block stores, for an
-/// affine placement (the inverse of `parse_smart`), the source rect for a projective one (as
-/// `parse_smart_perspective` reads it).
+/// affine placement (the inverse of `parse_smart`) and a projective one (the inverse of
+/// `parse_smart_perspective`) alike.
 fn quad_points(s: &PlacedSpec<'_>, warp: Option<&Warp>) -> [f64; 8] {
     let (w, h) = s.size;
     let [a, b, c, d, e, f] = s.transform.m;
@@ -711,7 +711,7 @@ fn quad_points(s: &PlacedSpec<'_>, warp: Option<&Warp>) -> [f64; 8] {
         Some(p) => photocraft_algo::transform::Homography(*p).apply(x, y),
         None => (a * x + c * y + e, b * x + d * y + f),
     };
-    let [x0, y0, x1, y1] = if s.perspective.is_some() { [0.0, 0.0, w, h] } else { crate::blocks::placed_frame(warp, w, h) };
+    let [x0, y0, x1, y1] = crate::blocks::placed_frame(warp, w, h);
     let mut out = [0.0; 8];
     for (i, (x, y)) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].into_iter().enumerate() {
         (out[2 * i], out[2 * i + 1]) = map(x, y);
