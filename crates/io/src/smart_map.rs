@@ -744,10 +744,22 @@ fn split_mesh(w: Option<&Warp>) -> Option<&BezierMesh> {
 
 /// The warp `SoLd` stores: none, with a message, for a split warp of more patches along a side
 /// than a `quiltWarp` is read with, so its corners are framed by the source rect as on reopen.
-fn sold_warp<'a>(w: Option<&'a Warp>, warnings: &mut Vec<String>) -> Option<&'a Warp> {
+fn sold_warp<'a>(s: &PlacedSpec<'a>, warnings: &mut Vec<String>) -> Option<&'a Warp> {
+    let w = s.warp;
     let too_big = split_mesh(w).is_some_and(|m| m.us.len().max(m.vs.len()) > crate::blocks::QUILT_MAX_PATCHES + 1);
     if too_big {
         warnings.push(format!("a split warp of more than {} patches along a side was written to PSD without its warp", crate::blocks::QUILT_MAX_PATCHES));
+        return None;
+    }
+    framed_warp(s, w, warnings)
+}
+
+/// `w`, or none with a message when the perspective sends a corner of its frame to the horizon:
+/// the descriptors can't store that corner (`parse_smart_perspective` rejects it), so the corners
+/// are framed by the source rect instead, as for a placement without the warp.
+fn framed_warp<'a>(s: &PlacedSpec<'_>, w: Option<&'a Warp>, warnings: &mut Vec<String>) -> Option<&'a Warp> {
+    if w.is_some() && !quad_points(s, w).iter().all(|v| v.is_finite()) {
+        warnings.push("a warp whose frame the perspective sends to the horizon was written to PSD without its warp".into());
         return None;
     }
     w
@@ -853,7 +865,7 @@ fn pad4(mut v: Vec<u8>) -> Vec<u8> {
 /// the placed id (for a duplicate), transform (when it moved), warp and filter stack are rewritten;
 /// otherwise a fresh descriptor in Photoshop's key order. A split warp goes in `quiltWarp`.
 pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &mut Vec<String>) -> Vec<u8> {
-    let stored = sold_warp(s.warp, warnings);
+    let stored = sold_warp(s, warnings);
     let warp = warp_desc(stored, s.size, warnings);
     let split = stored.zip(split_mesh(stored));
     let d = match template {
@@ -924,7 +936,7 @@ pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &
 /// `PlLd` block data (`plcL` version 3): the legacy placed-layer record Photoshop writes next to
 /// `SoLd`. It has no split warp: it stores none, its corners framed by the source rect.
 pub fn plld_bytes(s: &PlacedSpec<'_>, warnings: &mut Vec<String>) -> Vec<u8> {
-    let warp = s.warp.filter(|_| split_mesh(s.warp).is_none());
+    let warp = framed_warp(s, s.warp.filter(|_| split_mesh(s.warp).is_none()), warnings);
     let mut out = b"plcL".to_vec();
     out.extend_from_slice(&3u32.to_be_bytes());
     let id = s.idnt.as_bytes();
@@ -1437,6 +1449,44 @@ mod tests {
         let sold = sold_bytes(None, &spec, &mut w);
         assert_eq!(crate::blocks::parse_smart_perspective(b"SoLd", &sold), None);
         assert_eq!(crate::blocks::parse_smart_perspective(b"PlLd", &sold), None);
+    }
+
+    /// A warp whose control box reaches the perspective's horizon can't frame finite corners: it is
+    /// written without its warp, framed by the source rect, and the placement still reads back.
+    #[test]
+    fn warp_frame_at_the_horizon_is_written_without_the_warp() {
+        // The horizon of this map is x = 100; one control point of the warp sits on it.
+        let p = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, -0.01, 0.0, 1.0];
+        let mut mesh = BezierMesh::identity([0.0, 0.0, 64.0, 32.0], 1, 1);
+        mesh.points[3] = [100.0, 0.0];
+        let warp = Warp::custom(mesh, [0.0, 0.0, 64.0, 32.0]);
+        let spec = PlacedSpec {
+            idnt: "id",
+            placed: "pl",
+            transform: Affine::IDENTITY,
+            perspective: Some(p),
+            size: (64.0, 32.0),
+            dpi: 72.0,
+            warp: Some(&warp),
+            filter_fx: None,
+        };
+        assert!(!quad_points(&spec, spec.warp).iter().all(|v| v.is_finite()), "the frame reaches the horizon");
+        let mut w = Vec::new();
+        let sold = sold_bytes(None, &spec, &mut w);
+        assert!(w.iter().any(|m| m.contains("horizon")), "{w:?}");
+        let d = sold_descriptor(&sold).unwrap();
+        for k in ["Trnf", "nonAffineTransform"] {
+            let Some(Value::List(q)) = d.get(k) else { panic!("{k}") };
+            assert!(q.iter().all(|v| crate::blocks::num(Some(v)).is_some_and(f64::is_finite)), "{k}: {q:?}");
+        }
+        let back = crate::blocks::parse_smart_perspective(b"SoLd", &sold).expect("a projective placement");
+        let n = |m: [f64; 9]| m.map(|v| v / m[8]);
+        for (a, b) in n(back).iter().zip(n(p)) {
+            assert!((a - b).abs() < 1e-9 * (1.0 + b.abs()), "{back:?} vs {p:?}");
+        }
+        w.clear();
+        photocraft_psd::TaggedBlock::new(*b"PlLd", plld_bytes(&spec, &mut w)).check_structure().unwrap();
+        assert!(w.iter().any(|m| m.contains("horizon")), "{w:?}");
     }
 
     /// `quad_moved` compares the corners a template stores with the placement's: unchanged keeps
