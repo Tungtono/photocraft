@@ -588,7 +588,7 @@ pub(crate) fn warp_of(w: &Descriptor) -> Option<Option<photocraft_geom::warp::Wa
     // Photoshop's Cylinder warp keeps its handles in `warpValues` instead of a mesh.
     if style_id == b"warpCylinder" {
         let Some(Value::List(vals)) = w.get("warpValues") else { return None };
-        let v: Vec<f64> = vals.iter().filter_map(|x| num(Some(x))).collect();
+        let v: Vec<f64> = vals.iter().map(|x| num(Some(x))).collect::<Option<_>>()?;
         return Warp::cylinder(<[f64; 7]>::try_from(v).ok()?, bounds()?).map(Some);
     }
     let style = WarpStyle::parse(&String::from_utf8_lossy(style_id))?;
@@ -1096,16 +1096,17 @@ mod tests {
             .with("Left", Value::Double(0.0))
             .with("Btom", Value::Double(761.0))
             .with("Rght", Value::Double(505.0));
-        let sold = |values: Vec<f64>| {
+        let sold_list = |values: Vec<Value>| {
             let w = Descriptor::new("warp")
                 .with("warpStyle", e("warpStyle", "warpCylinder"))
-                .with("warpValues", Value::List(values.into_iter().map(Value::Double).collect()))
+                .with("warpValues", Value::List(values))
                 .with("bounds", Value::Descriptor(bounds.clone()));
             let mut v = b"soLD".to_vec();
             v.extend_from_slice(&4u32.to_be_bytes());
             v.extend(VersionedDescriptor::new(Descriptor::new("null").with("warp", Value::Descriptor(w))).to_bytes());
             v
         };
+        let sold = |values: Vec<f64>| sold_list(values.into_iter().map(Value::Double).collect());
         let values = [122.27, 1207.43, 606.51, 261.0, 0.1508, -0.4065, 0.9];
         let w = parse_placed_warp(b"SoLd", &sold(values.to_vec())).expect("cylinder reads");
         assert_eq!(Some(w.clone()), Warp::cylinder(values, [0.0, 0.0, 505.0, 761.0]));
@@ -1114,6 +1115,10 @@ mod tests {
         assert!((f[0] - 122.27).abs() < 0.5 && (f[1] - 261.0).abs() < 1e-9 && (f[2] - 606.51).abs() < 0.5 && (f[3] - 1207.43).abs() < 1e-9, "{f:?}");
         assert!(parse_placed_warp(b"SoLd", &sold(values[..6].to_vec())).is_none(), "six handles");
         assert!(parse_placed_warp(b"SoLd", &sold(vec![0.0, 761.0, 505.0, 0.0, 0.2, 0.2, 0.4])).is_none(), "unmodelled k");
+        // An entry that is not a number makes the warp unreadable instead of shifting the handles.
+        let mut mixed: Vec<Value> = values.iter().map(|&x| Value::Double(x)).collect();
+        mixed.insert(2, Value::Boolean(true));
+        assert!(parse_placed_warp(b"SoLd", &sold_list(mixed)).is_none(), "non-number entry");
     }
 
     #[test]
